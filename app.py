@@ -2,15 +2,21 @@ from flask import Flask, jsonify, request
 from flask_cors import CORS  # Import CORS
 from firebase_admin import credentials, initialize_app, db, storage
 from datetime import datetime, timedelta
+import psycopg2
 
 app = Flask(__name__)
 CORS(app)  # อนุญาต CORS ทุกโดเมน
+
+# Connection String สำหรับ Neon PostgreSQL
+conn_string = "postgresql://facerecon_owner:NsqA5QSpbT2G@ep-super-bonus-a1hmwxyx.ap-southeast-1.aws.neon.tech/facerecon?sslmode=require"
 
 # Firebase Config
 cred = credentials.Certificate('parth.json')
 initialize_app(cred, {
     'storageBucket': 'face-recognition-459a6.appspot.com',
     'databaseURL': 'https://face-recognition-459a6-default-rtdb.asia-southeast1.firebasedatabase.app/'})
+
+
 
 # API สำหรับตรวจสอบการ Login
 @app.route('/api/login', methods=['POST'])
@@ -38,6 +44,35 @@ def login():
 
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+
+
+# ฟังก์ชันสำหรับเชื่อมต่อฐานข้อมูล
+def get_db_connection():
+    conn = psycopg2.connect(conn_string)
+    return conn
+
+# API Endpoint: ดึงข้อมูลจากตาราง (ตัวอย่างตาราง users)
+@app.route('/api/users', methods=['GET'])
+def get_users():
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        # Query ข้อมูลจากตาราง users
+        query = "SELECT user_id, name, room_number, total_attendance, last_attendance_time, dominant_emotion FROM logs;"
+        cursor.execute(query)
+        rows = cursor.fetchall()
+
+        # แปลงข้อมูลเป็น JSON
+        users = [{"user_id": row[0], "name": row[1], "room_number": row[2], "total_attendance": row[3], "last_attendance_time": row[4], "dominant_emotion": row[5] } for row in rows]
+
+        cursor.close()
+        conn.close()
+
+        return jsonify(users), 200
+    except Exception as e:
+        print(f"Error: {e}")
+        return jsonify({"error": str(e)}), 500
 
 @app.route('/images', methods=['GET'])
 def get_images():
