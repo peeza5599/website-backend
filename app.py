@@ -153,27 +153,30 @@ def update_user(user_id):
         data = request.form.to_dict()
         new_image = request.files.get('image')  # รับไฟล์ภาพใหม่
 
-        ref = db.reference(f'room/{user_id}')
+        ref = db.reference(f'room/{user_id}')  # ใช้ Room_Number เป็น Key
         user_data = ref.get()
 
         if not user_data:
             return jsonify({'error': 'User not found'}), 404
 
-        # อัปเดตเฉพาะข้อมูลใน Realtime Database (ไม่แตะต้อง image_url)
+        # ✅ ตรวจสอบและลบ key 'id' ออกจาก data ก่อนอัปเดต
+        if 'id' in data:
+            del data['id']
+
+        # ✅ อัปเดตข้อมูลเฉพาะใน Firebase Realtime Database โดยไม่เพิ่มคอลัมน์ id
         ref.update(data)
 
-        # ถ้ามีการอัปโหลดรูปใหม่
+        # ✅ ถ้ามีการอัปโหลดรูปใหม่ ให้บันทึกทับรูปเก่า
         if new_image:
-            # **🎯 Resize ภาพเป็น 216x216 และบันทึกเป็น PNG**
             image = Image.open(new_image)
             image = image.resize((216, 216))  # Resize ภาพเป็น 216x216
             image_io = io.BytesIO()
             image.save(image_io, format='PNG')  # บันทึกเป็น PNG
             image_io.seek(0)
 
-            # อัปโหลดไฟล์ใหม่ไปที่ Firebase Storage
+            # ✅ อัปโหลดไฟล์ใหม่ไปที่ Firebase Storage (ใช้ Room_Number เป็นชื่อไฟล์)
             bucket = storage.bucket()
-            image_path = f'Images/{user_id}.png'  # ใช้ชื่อเดิมเพื่อเขียนทับไฟล์เก่า
+            image_path = f'Images/{user_id}.png'  # ใช้ Room_Number เป็นชื่อไฟล์
             blob = bucket.blob(image_path)
             blob.upload_from_file(image_io, content_type='image/png')
 
@@ -196,6 +199,19 @@ def add_user():
 
         room_number = str(data.get('Room_Number'))  # ใช้ Room_Number เป็น Key ใน Firebase
         data['last_attendance_time'] = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")  # กำหนดเวลา
+
+        # 📌 แปลงค่าของ total_attendance และ starting_year ให้เป็น int
+        if 'total_attendance' in data:
+            try:
+                data['total_attendance'] = int(data['total_attendance'])
+            except ValueError:
+                data['total_attendance'] = 0  # ถ้าค่าไม่ใช่ตัวเลข ให้กำหนดเป็น 0
+
+        if 'starting_year' in data:
+            try:
+                data['starting_year'] = int(data['starting_year'])
+            except ValueError:
+                data['starting_year'] = datetime.utcnow().year  # ถ้าค่าไม่ใช่ตัวเลข กำหนดเป็นปีปัจจุบัน
 
         # 📌 ถ้ามีการอัปโหลดรูปภาพ
         if new_image:
@@ -220,6 +236,7 @@ def add_user():
     except Exception as e:
         print(f"Error adding user: {e}")
         return jsonify({'error': str(e)}), 500
+
 
 if __name__ == '__main__':
     app.run(debug=True)
