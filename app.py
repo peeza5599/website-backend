@@ -17,6 +17,7 @@ cred = credentials.Certificate('parth.json')
 initialize_app(cred, {
     'storageBucket': 'face-recognition-459a6.appspot.com',
     'databaseURL': 'https://face-recognition-459a6-default-rtdb.asia-southeast1.firebasedatabase.app/'})
+bucket = storage.bucket()
 
 
 
@@ -235,6 +236,43 @@ def add_user():
 
     except Exception as e:
         print(f"Error adding user: {e}")
+        return jsonify({'error': str(e)}), 500
+    
+@app.route('/api/upload-face-images', methods=['POST'])
+def upload_face_images():
+    try:
+        # รับค่า Room_Number และรายการไฟล์ที่อัปโหลด
+        room_number = request.form.get('Room_Number')
+        face_images = request.files.getlist('faceImages')
+
+        if not room_number or not face_images:
+            return jsonify({'error': 'Missing Room Number or face images'}), 400
+
+        # กำหนดโฟลเดอร์ที่ใช้เก็บรูปภาพใน Firebase Storage
+        folder_path = f'trainface/{room_number}/'
+        bucket = storage.bucket()
+
+        uploaded_files = []
+        for idx, face_image in enumerate(face_images):
+            # อ่านไฟล์และเตรียมอัปโหลด
+            face_io = io.BytesIO(face_image.read())
+            face_path = f'{folder_path}face_{idx}.png'
+            blob = bucket.blob(face_path)
+
+            # ✅ อัปโหลดไฟล์ไปยัง Firebase Storage
+            blob.upload_from_file(io.BytesIO(face_io.getvalue()), content_type='image/png')
+
+            # 🔹 บันทึก URL ของไฟล์ที่อัปโหลดสำเร็จ
+            uploaded_files.append(blob.public_url)
+
+        return jsonify({
+            'message': 'Face images uploaded successfully',
+            'room_number': room_number,
+            'uploaded_files': uploaded_files
+        }), 201
+
+    except Exception as e:
+        print(f"Error uploading face images: {e}")
         return jsonify({'error': str(e)}), 500
 
 
