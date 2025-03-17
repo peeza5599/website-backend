@@ -5,6 +5,8 @@ from datetime import datetime, timedelta
 import psycopg2
 from PIL import Image
 import io
+import pytz
+from datetime import datetime
 
 app = Flask(__name__)
 CORS(app)  # อนุญาต CORS ทุกโดเมน
@@ -18,6 +20,8 @@ initialize_app(cred, {
     'storageBucket': 'face-recognition-459a6.appspot.com',
     'databaseURL': 'https://face-recognition-459a6-default-rtdb.asia-southeast1.firebasedatabase.app/'})
 bucket = storage.bucket()
+
+bangkok_tz = pytz.timezone('Asia/Bangkok')
 
 
 
@@ -128,25 +132,32 @@ def get_realtime_data_with_images():
 @app.route('/api/delete-user/<string:user_id>', methods=['DELETE'])
 def delete_user(user_id):
     try:
-        # ลบข้อมูลจาก Firebase Realtime Database
+        # ✅ ลบข้อมูลจาก Firebase Realtime Database
         ref = db.reference(f'room/{user_id}')
         if ref.get() is None:
             return jsonify({'error': 'User not found'}), 404
         ref.delete()
 
-        # ลบรูปภาพจาก Firebase Storage
+        # ✅ ลบรูปภาพโปรไฟล์จาก Firebase Storage
         bucket = storage.bucket()
         image_path = f'Images/{user_id}.png'
         blob = bucket.blob(image_path)
-
         if blob.exists():
             blob.delete()
 
-        return jsonify({'message': 'User deleted successfully'}), 200
+        # ✅ ลบ **โฟลเดอร์ trainface/{user_id}/** ทั้งหมด
+        folder_path = f'trainface/{user_id}/'
+        blobs = bucket.list_blobs(prefix=folder_path)  # ดึงรายการไฟล์ทั้งหมดในโฟลเดอร์นี้
+
+        for blob in blobs:
+            blob.delete()  # ลบไฟล์ทั้งหมดในโฟลเดอร์
+
+        return jsonify({'message': f'User {user_id} and all related data deleted successfully'}), 200
 
     except Exception as e:
         print(f"Error deleting user {user_id}: {e}")
         return jsonify({'error': str(e)}), 500
+
 
 @app.route('/api/update-user/<string:user_id>', methods=['PUT'])
 def update_user(user_id):
@@ -191,48 +202,43 @@ def update_user(user_id):
 @app.route('/api/add-user', methods=['POST'])
 def add_user():
     try:
-        data = request.form.to_dict()  # รับข้อมูลเป็น Dictionary
-        new_image = request.files.get('image')  # รับไฟล์รูปภาพ
+        data = request.form.to_dict()
+        new_image = request.files.get('image')
 
-        # ตรวจสอบว่ามีค่า Room_Number และ Name หรือไม่
-        if not data.get('name') or not data.get('Room_Number'):
+        # ตรวจสอบข้อมูลที่ต้องมี
+        if not data.get('name') or not data.get('role'):
             return jsonify({'error': 'Missing required fields'}), 400
 
-        room_number = str(data.get('Room_Number'))  # ใช้ Room_Number เป็น Key ใน Firebase
-        data['last_attendance_time'] = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")  # กำหนดเวลา
+        # ค้นหา Room_Number ล่าสุด แล้ว +1 (รักษาฟอร์แมต 3 หลัก)
+        ref = db.reference('room')
+        existing_users = ref.get()
+        if existing_users:
+            last_id = max(map(int, existing_users.keys()))  # หาเลขสูงสุดที่มีอยู่
+            next_id = f"{last_id + 1:03d}"  # บังคับให้เป็นเลข 3 หลัก
+        else:
+            next_id = "001"  # ถ้าไม่มีผู้ใช้เลย ให้เริ่มจาก 001
 
-        # 📌 แปลงค่าของ total_attendance และ starting_year ให้เป็น int
-        if 'total_attendance' in data:
-            try:
-                data['total_attendance'] = int(data['total_attendance'])
-            except ValueError:
-                data['total_attendance'] = 0  # ถ้าค่าไม่ใช่ตัวเลข ให้กำหนดเป็น 0
+        data['Room_Number'] = next_id
+        data['last_attendance_time'] = datetime.now(bangkok_tz).strftime("%Y-%m-%d %H:%M:%S")
+        data['total_attendance'] = 0
 
-        if 'starting_year' in data:
-            try:
-                data['starting_year'] = int(data['starting_year'])
-            except ValueError:
-                data['starting_year'] = datetime.utcnow().year  # ถ้าค่าไม่ใช่ตัวเลข กำหนดเป็นปีปัจจุบัน
-
-        # 📌 ถ้ามีการอัปโหลดรูปภาพ
+        # อัปโหลดรูปภาพโปรไฟล์ (ถ้ามี)
         if new_image:
             image = Image.open(new_image)
-            image = image.resize((216, 216))  # Resize เป็น 216x216
+            image = image.resize((216, 216))
             image_io = io.BytesIO()
             image.save(image_io, format='PNG')
             image_io.seek(0)
 
-            # อัปโหลดภาพไปที่ Firebase Storage
             bucket = storage.bucket()
-            image_path = f'Images/{room_number}.png'  # ใช้ Room_Number เป็นชื่อไฟล์
+            image_path = f'Images/{next_id}.png'  # ใช้ Room_Number ที่มี 3 หลัก
             blob = bucket.blob(image_path)
             blob.upload_from_file(image_io, content_type='image/png')
 
-        # เพิ่มข้อมูลลง Firebase **โดยไม่เพิ่ม image_url**
-        ref = db.reference(f'room/{room_number}')
-        ref.set(data)
+        # บันทึกข้อมูลลง Firebase Realtime Database
+        ref.child(next_id).set(data)
 
-        return jsonify({'message': 'User added successfully', 'room_number': room_number, 'last_attendance_time': data['last_attendance_time']}), 201
+        return jsonify({'message': 'User added successfully', 'room_number': next_id}), 201
 
     except Exception as e:
         print(f"Error adding user: {e}")
@@ -241,28 +247,26 @@ def add_user():
 @app.route('/api/upload-face-images', methods=['POST'])
 def upload_face_images():
     try:
-        # รับค่า Room_Number และรายการไฟล์ที่อัปโหลด
         room_number = request.form.get('Room_Number')
         face_images = request.files.getlist('faceImages')
 
         if not room_number or not face_images:
             return jsonify({'error': 'Missing Room Number or face images'}), 400
 
-        # กำหนดโฟลเดอร์ที่ใช้เก็บรูปภาพใน Firebase Storage
+        # 🔥 บังคับให้ Room_Number มี 3 หลักเสมอ
+        room_number = str(room_number).zfill(3)
+
+        # อัปโหลดรูปภาพไปที่ Firebase Storage
         folder_path = f'trainface/{room_number}/'
         bucket = storage.bucket()
 
         uploaded_files = []
         for idx, face_image in enumerate(face_images):
-            # อ่านไฟล์และเตรียมอัปโหลด
             face_io = io.BytesIO(face_image.read())
             face_path = f'{folder_path}face_{idx}.png'
             blob = bucket.blob(face_path)
-
-            # ✅ อัปโหลดไฟล์ไปยัง Firebase Storage
             blob.upload_from_file(io.BytesIO(face_io.getvalue()), content_type='image/png')
 
-            # 🔹 บันทึก URL ของไฟล์ที่อัปโหลดสำเร็จ
             uploaded_files.append(blob.public_url)
 
         return jsonify({
@@ -270,6 +274,10 @@ def upload_face_images():
             'room_number': room_number,
             'uploaded_files': uploaded_files
         }), 201
+
+    except Exception as e:
+        print(f"Error uploading face images: {e}")
+        return jsonify({'error': str(e)}), 500
 
     except Exception as e:
         print(f"Error uploading face images: {e}")
