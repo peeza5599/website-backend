@@ -192,11 +192,25 @@ def update_user(user_id):
             blob = bucket.blob(image_path)
             blob.upload_from_file(image_io, content_type='image/png')
 
-        return jsonify({'message': 'User updated successfully'}), 200
+        # ✅ อัปเดตชื่อใน PostgreSQL Database ด้วย
+        conn = psycopg2.connect(conn_string)
+        cursor = conn.cursor()
+        update_query = """
+        UPDATE logs
+        SET name = %s
+        WHERE user_id = %s
+        """
+        cursor.execute(update_query, (data['name'], user_id))  # อัปเดตชื่อ
+        conn.commit()
+        cursor.close()
+        conn.close()
+
+        return jsonify({'message': 'User updated successfully in Firebase and PostgreSQL'}), 200
 
     except Exception as e:
         print(f"Error updating user {user_id}: {e}")
         return jsonify({'error': str(e)}), 500
+
 
 
 @app.route('/api/add-user', methods=['POST'])
