@@ -7,6 +7,7 @@ from PIL import Image
 import io
 import pytz
 from datetime import datetime
+from psycopg2.extras import RealDictCursor
 
 app = Flask(__name__)
 CORS(app)  # อนุญาต CORS ทุกโดเมน
@@ -96,61 +97,83 @@ def get_images():
 @app.route('/api/realtime-data', methods=['GET'])
 def get_realtime_data_with_images():
     try:
-        # ดึงข้อมูลทั้งหมดจาก Firebase Realtime Database (path: "room")
-        ref = db.reference('room')
-        data = ref.get()
+        # ✅ เชื่อมต่อ PostgreSQL
+        conn = psycopg2.connect(conn_string)
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
 
-        if not data:
+        # ✅ ดึงข้อมูลจากตาราง users
+        cursor.execute("SELECT id, name, role, standing, studyClass, total_attendance, last_attendance_time FROM users;")
+        users = cursor.fetchall()
+        cursor.close()
+        conn.close()
+
+        if not users:
             return jsonify({'message': 'No data found'}), 404
 
-        # สร้าง bucket สำหรับเชื่อมต่อ Firebase Storage
+        # ✅ เชื่อมต่อ Firebase Storage
         bucket = storage.bucket()
 
-        # เพิ่ม URL รูปภาพให้แต่ละรายการใน data
-        for user_id, user_data in data.items():
-            try:
-                # สร้าง path ของรูปใน Firebase Storage
-                image_path = f'Images/{user_id}.png'
-                blob = bucket.blob(image_path)
+        # ✅ เพิ่ม URL รูปภาพให้แต่ละผู้ใช้
+        for user in users:
+            user_id = str(user['id'])  # ใช้ `id` จาก PostgreSQL
+            image_path = f'Images/{user_id}.png'
+            blob = bucket.blob(image_path)
 
-                # ตรวจสอบว่ามีรูปใน bucket หรือไม่ และสร้าง signed URL
+            try:
                 if blob.exists():
                     expiration_time = datetime.utcnow() + timedelta(hours=24)  # URL มีอายุ 24 ชั่วโมง
-                    image_url = blob.generate_signed_url(expiration=expiration_time)
-                    user_data['image_url'] = image_url
+                    user['image_url'] = blob.generate_signed_url(expiration=expiration_time)
                 else:
-                    user_data['image_url'] = None  # หากไม่มีรูปใน bucket
+                    user['image_url'] = None  # ไม่มีรูป
             except Exception as e:
-                user_data['image_url'] = None  # กรณีเกิดข้อผิดพลาดในการดึงรูป
+                user['image_url'] = None  # หากเกิดข้อผิดพลาด
 
-        return jsonify(data), 200
+        return jsonify(users), 200
 
     except Exception as e:
         print(f"Error fetching data with images: {e}")
         return jsonify({'error': str(e)}), 500
+
     
 @app.route('/api/delete-user/<string:user_id>', methods=['DELETE'])
 def delete_user(user_id):
     try:
-        # ✅ ลบข้อมูลจาก Firebase Realtime Database
-        ref = db.reference(f'room/{user_id}')
-        if ref.get() is None:
-            return jsonify({'error': 'User not found'}), 404
-        ref.delete()
+        # ✅ เชื่อมต่อ PostgreSQL
+        conn = psycopg2.connect(conn_string)
+        cursor = conn.cursor()
 
-        # ✅ ลบรูปภาพโปรไฟล์จาก Firebase Storage
+        # ✅ ตรวจสอบว่า user_id มีอยู่ใน users หรือไม่
+        check_user_query = "SELECT 1 FROM users WHERE id = %s;"
+        cursor.execute(check_user_query, (user_id,))
+        user_exists = cursor.fetchone()
+
+        if not user_exists:
+            cursor.close()
+            conn.close()
+            return jsonify({'error': 'User not found in users table'}), 404
+
+
+        # ✅ ลบข้อมูลจากตาราง users
+        delete_users_query = "DELETE FROM users WHERE id = %s;"
+        cursor.execute(delete_users_query, (user_id,))
+
+        conn.commit()
+        cursor.close()
+        conn.close()
+
+
+        # ✅ ลบรูปโปรไฟล์จาก Firebase Storage
         bucket = storage.bucket()
         image_path = f'Images/{user_id}.png'
         blob = bucket.blob(image_path)
         if blob.exists():
             blob.delete()
 
-        # ✅ ลบ **โฟลเดอร์ trainface/{user_id}/** ทั้งหมด
+        # ✅ ลบโฟลเดอร์ trainface/{user_id}/ ทั้งหมด
         folder_path = f'trainface/{user_id}/'
-        blobs = bucket.list_blobs(prefix=folder_path)  # ดึงรายการไฟล์ทั้งหมดในโฟลเดอร์นี้
-
+        blobs = bucket.list_blobs(prefix=folder_path)
         for blob in blobs:
-            blob.delete()  # ลบไฟล์ทั้งหมดในโฟลเดอร์
+            blob.delete()
 
         return jsonify({'message': f'User {user_id} and all related data deleted successfully'}), 200
 
@@ -165,20 +188,54 @@ def update_user(user_id):
         data = request.form.to_dict()
         new_image = request.files.get('image')  # รับไฟล์ภาพใหม่
 
-        ref = db.reference(f'room/{user_id}')  # ใช้ Room_Number เป็น Key
-        user_data = ref.get()
+        conn = psycopg2.connect(conn_string)
+        cursor = conn.cursor()
 
-        if not user_data:
-            return jsonify({'error': 'User not found'}), 404
+        # ✅ เช็คว่ามี user ใน users หรือไม่
+        check_users_query = "SELECT 1 FROM users WHERE id = %s;"
+        cursor.execute(check_users_query, (user_id,))
+        user_exists = cursor.fetchone()
 
-        # ✅ ตรวจสอบและลบ key 'id' ออกจาก data ก่อนอัปเดต
-        if 'id' in data:
-            del data['id']
+        if not user_exists:
+            cursor.close()
+            conn.close()
+            return jsonify({'error': 'User not found in users table'}), 404
 
-        # ✅ อัปเดตข้อมูลเฉพาะใน Firebase Realtime Database โดยไม่เพิ่มคอลัมน์ id
-        ref.update(data)
+        # ✅ อัปเดตข้อมูลใน users table
+        update_users_query = """
+        UPDATE users
+        SET name = %s, role = %s, standing = %s, studyClass = %s, total_attendance = %s, last_attendance_time = %s
+        WHERE id = %s;
+        """
+        cursor.execute(update_users_query, (
+            data.get('name'),
+            data.get('role'),
+            data.get('standing', 'Com-Tech'),
+            data.get('studyClass', '-'),
+            data.get('total_attendance', 0),
+            data.get('last_attendance_time'),
+            user_id
+        ))
 
-        # ✅ ถ้ามีการอัปโหลดรูปใหม่ ให้บันทึกทับรูปเก่า
+        # ✅ เช็คว่ามี user_id ใน logs หรือไม่
+        check_logs_query = "SELECT 1 FROM logs WHERE user_id = %s;"
+        cursor.execute(check_logs_query, (user_id,))
+        logs_exists = cursor.fetchone()
+
+        # ✅ ถ้า user_id มีอยู่ใน logs → อัปเดตชื่อใน logs ด้วย
+        if logs_exists:
+            update_logs_query = """
+            UPDATE logs
+            SET name = %s
+            WHERE user_id = %s;
+            """
+            cursor.execute(update_logs_query, (data.get('name'), user_id))
+
+        conn.commit()
+        cursor.close()
+        conn.close()
+
+        # ✅ อัปโหลดรูปภาพใหม่ (ถ้ามี)
         if new_image:
             image = Image.open(new_image)
             image = image.resize((216, 216))  # Resize ภาพเป็น 216x216
@@ -186,26 +243,13 @@ def update_user(user_id):
             image.save(image_io, format='PNG')  # บันทึกเป็น PNG
             image_io.seek(0)
 
-            # ✅ อัปโหลดไฟล์ใหม่ไปที่ Firebase Storage (ใช้ Room_Number เป็นชื่อไฟล์)
+            # ✅ อัปโหลดไฟล์ใหม่ไปที่ Firebase Storage (ใช้ user_id เป็นชื่อไฟล์)
             bucket = storage.bucket()
-            image_path = f'Images/{user_id}.png'  # ใช้ Room_Number เป็นชื่อไฟล์
+            image_path = f'Images/{user_id}.png'
             blob = bucket.blob(image_path)
             blob.upload_from_file(image_io, content_type='image/png')
 
-        # ✅ อัปเดตชื่อใน PostgreSQL Database ด้วย
-        conn = psycopg2.connect(conn_string)
-        cursor = conn.cursor()
-        update_query = """
-        UPDATE logs
-        SET name = %s
-        WHERE user_id = %s
-        """
-        cursor.execute(update_query, (data['name'], user_id))  # อัปเดตชื่อ
-        conn.commit()
-        cursor.close()
-        conn.close()
-
-        return jsonify({'message': 'User updated successfully in Firebase and PostgreSQL'}), 200
+        return jsonify({'message': 'User updated successfully'}), 200
 
     except Exception as e:
         print(f"Error updating user {user_id}: {e}")
@@ -213,85 +257,96 @@ def update_user(user_id):
 
 
 
+
+
 @app.route('/api/add-user', methods=['POST'])
 def add_user():
     try:
         data = request.form.to_dict()
-        new_image = request.files.get('image')
+        profile_image = request.files.get('image')  # รูปโปรไฟล์
+        face_images = request.files.getlist('faceImages')  # ✅ รูปใบหน้าหลายไฟล์
 
-        # ตรวจสอบข้อมูลที่ต้องมี
         if not data.get('name') or not data.get('role'):
             return jsonify({'error': 'Missing required fields'}), 400
 
-        # ค้นหา Room_Number ล่าสุด แล้ว +1 (รักษาฟอร์แมต 3 หลัก)
-        ref = db.reference('room')
-        existing_users = ref.get()
-        if existing_users:
-            last_id = max(map(int, existing_users.keys()))  # หาเลขสูงสุดที่มีอยู่
-            next_id = f"{last_id + 1:03d}"  # บังคับให้เป็นเลข 3 หลัก
-        else:
-            next_id = "001"  # ถ้าไม่มีผู้ใช้เลย ให้เริ่มจาก 001
+        # ✅ เพิ่มผู้ใช้ลง PostgreSQL
+        conn = psycopg2.connect(conn_string)
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
 
-        data['Room_Number'] = next_id
-        data['last_attendance_time'] = datetime.now(bangkok_tz).strftime("%Y-%m-%d %H:%M:%S")
-        data['total_attendance'] = 0
+        # ✅ ดึงเวลาปัจจุบัน (Bangkok)
+        current_time = datetime.now(bangkok_tz).strftime("%Y-%m-%d %H:%M:%S")
 
-        # อัปโหลดรูปภาพโปรไฟล์ (ถ้ามี)
-        if new_image:
-            image = Image.open(new_image)
+        # ✅ INSERT ลง PostgreSQL และคืนค่า `id`
+        insert_query = """
+        INSERT INTO users (name, role, standing, studyClass, total_attendance, last_attendance_time)
+        VALUES (%s, %s, %s, %s, %s, %s) RETURNING id;
+        """
+        cursor.execute(insert_query, (
+            data.get('name'),
+            data.get('role'),
+            data.get('standing', 'Com-Tech'),
+            data.get('studyClass', '-'),
+            0,
+            current_time
+        ))
+
+        new_user = cursor.fetchone()
+        user_id = str(new_user['id'])  # ✅ `id` ที่เพิ่งสร้าง
+        conn.commit()
+        cursor.close()
+        conn.close()
+
+        # ✅ อัปโหลด **รูปโปรไฟล์**
+        if profile_image:
+            image = Image.open(profile_image)
             image = image.resize((216, 216))
             image_io = io.BytesIO()
             image.save(image_io, format='PNG')
             image_io.seek(0)
 
             bucket = storage.bucket()
-            image_path = f'Images/{next_id}.png'  # ใช้ Room_Number ที่มี 3 หลัก
+            image_path = f'Images/{user_id}.png'  # ใช้ user_id เป็นชื่อไฟล์
             blob = bucket.blob(image_path)
             blob.upload_from_file(image_io, content_type='image/png')
 
-        # บันทึกข้อมูลลง Firebase Realtime Database
-        ref.child(next_id).set(data)
-
-        return jsonify({'message': 'User added successfully', 'room_number': next_id}), 201
+        return jsonify({
+            'message': 'User added successfully',
+            'user_id': user_id,
+            'last_attendance_time': current_time
+        }), 201
 
     except Exception as e:
         print(f"Error adding user: {e}")
         return jsonify({'error': str(e)}), 500
+
     
 @app.route('/api/upload-face-images', methods=['POST'])
 def upload_face_images():
     try:
-        room_number = request.form.get('Room_Number')
+        user_id = request.form.get('user_id')  # ✅ เปลี่ยนจาก Room_Number เป็น user_id
         face_images = request.files.getlist('faceImages')
 
-        if not room_number or not face_images:
-            return jsonify({'error': 'Missing Room Number or face images'}), 400
+        if not user_id or not face_images:
+            return jsonify({'error': 'Missing user_id or face images'}), 400
 
-        # 🔥 บังคับให้ Room_Number มี 3 หลักเสมอ
-        room_number = str(room_number).zfill(3)
-
-        # อัปโหลดรูปภาพไปที่ Firebase Storage
-        folder_path = f'trainface/{room_number}/'
+        # ✅ อัปโหลดรูปภาพไปที่ Firebase Storage
+        folder_path = f'trainface/{user_id}/'
         bucket = storage.bucket()
 
         uploaded_files = []
         for idx, face_image in enumerate(face_images):
-            face_io = io.BytesIO(face_image.read())
+            face_io = io.BytesIO(face_image.read())  # ✅ อ่านไฟล์ครั้งเดียว
             face_path = f'{folder_path}face_{idx}.png'
             blob = bucket.blob(face_path)
-            blob.upload_from_file(io.BytesIO(face_io.getvalue()), content_type='image/png')
+            blob.upload_from_file(face_io, content_type='image/png')
 
             uploaded_files.append(blob.public_url)
 
         return jsonify({
             'message': 'Face images uploaded successfully',
-            'room_number': room_number,
+            'user_id': user_id,
             'uploaded_files': uploaded_files
         }), 201
-
-    except Exception as e:
-        print(f"Error uploading face images: {e}")
-        return jsonify({'error': str(e)}), 500
 
     except Exception as e:
         print(f"Error uploading face images: {e}")
