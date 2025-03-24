@@ -1,0 +1,34 @@
+# 🔥 Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# 🧪 Virtual Environment
+venv/
+env/
+
+# 🔑 Firebase Service Account
+parth.json
+
+# 📦 Dependency
+*.egg-info/
+
+# 🧪 Testing artifacts
+.coverage
+.cache
+.pytest_cache/
+
+# 🧠 IDEs
+.vscode/
+.idea/
+
+# 📂 OS Specific
+.DS_Store
+Thumbs.db
+
+# 📝 Logs
+*.log
+
+# 📦 Pipenv
+Pipfile.lock
