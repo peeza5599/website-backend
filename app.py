@@ -8,6 +8,8 @@ import io
 import pytz
 from datetime import datetime
 from psycopg2.extras import RealDictCursor
+import os
+import json
 
 app = Flask(__name__)
 CORS(app)  # อนุญาต CORS ทุกโดเมน
@@ -16,7 +18,9 @@ CORS(app)  # อนุญาต CORS ทุกโดเมน
 conn_string = "postgresql://facerecon_owner:NsqA5QSpbT2G@ep-super-bonus-a1hmwxyx.ap-southeast-1.aws.neon.tech/facerecon?sslmode=require"
 
 # Firebase Config
-cred = credentials.Certificate('parth.json')
+firebase_key = os.environ.get("FIREBASE_KEY")
+cred_dict = json.loads(firebase_key)
+cred = credentials.Certificate(cred_dict)
 initialize_app(cred, {
     'storageBucket': 'face-recognition-459a6.appspot.com',
     'databaseURL': 'https://face-recognition-459a6-default-rtdb.asia-southeast1.firebasedatabase.app/'})
